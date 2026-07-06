@@ -276,6 +276,154 @@ z -176.44~-15.01 — 이제 Spine 전체가 z<0, 즉 후방에 위치함 확인)
 이전 18mm에서 6.7mm로 줄어듦.
 검증 못한 것: 실제 화면에서 잘 붙어 보이는지 — 스크린샷 필요. 회전(뒤틀림)은 여전히 안 건드림.
 
+## 완료된 작업 (2026-07-06 - Dura/Falx/Tentorium/Ventricle 부착부 색 그라디언트)
+사용자가 "종양이 붙은 막(Dura 등)에 그 종양 색으로 그라디언트를 입혀달라, 같은 색 종양이 2개면
+2개의 focus를 가진 그라디언트로, 투명도는 좀 더 높여서"라고 요청. Tumor 밑면 shrink-wrap(스코프
+밖으로 남겨둔 항목)과 비교했을 때 이쪽이 훨씬 구현이 쉬워서 먼저 진행함(사용자도 동의).
+
+한 것:
+1. `duraMat/falxMat/tentoriumMat/ventricleMat` 네 개 재질에 `vertexColors = true` 켜고, 기본
+   opacity를 1.0/1.0/1.0/0.88 → 전부 0.8로 낮춤("투명도를 높여달라"는 요청 반영, 필요하면 숫자만
+   조정 가능).
+2. `updateAttachmentGradients()` 함수 추가(raycastForAttachment 바로 아래). 4개 막 각각에 대해:
+   그 막에 attachPoint를 가진 종양들을 필터링 → 각 정점마다 모든 종양과의 거리 기반 가우시안
+   가중치(sigma는 종양 반지름×XYZ평균배율×1.8 = 사용자가 고른 "종양 크기 비례" 방식)를 계산해서
+   정점 색을 흰색(무변화)에서 종양 색 쪽으로 blend함. 여러 종양이 겹치면 가중 평균 색 + 가중치
+   합이 커지는 방식이라 "같은 색 종양 2개 = 더 넓고 진한 그라디언트"가 자연스럽게 나옴. 최종
+   blend는 `(1-exp(-weightSum))×0.55`로 소프트 클램프해서 절대 불투명한 단색으로 안 뭉개지고
+   은은하게 비치는 느낌 유지. 정점-종양 거리가 3×sigma 넘으면 exp() 계산 자체를 건너뛰어서
+   (Dura는 52,000 vertex라 성능 신경 씀) 비용을 줄임.
+3. 재계산 호출 지점: `addTumor`/`deleteTumor`/`clearAllBtn` 각각에서 직접 호출, 그리고 `reattachToSurface()`
+   맨 끝에도 넣어서 이동 드래그, 크기/축별 배율 슬라이더(input 이벤트, 드래그 중 실시간), 리사이즈
+   핸들, Update 버튼(색 변경 포함) 등 기존에 `reattachToSurface`가 불리던 모든 지점에서 자동으로
+   같이 갱신되게 함. `loadLocal()`/JSON 불러오기도 내부적으로 `addTumor()`를 쓰므로 별도 수정 없이
+   페이지 로드 시 자동으로 그라디언트가 그려짐.
+
+검증한 것: JS 문법 파싱(전체 스크립트 blob을 `new Function()`으로 파싱 성공), 새 식별자
+(`updateAttachmentGradients`, `ATTACH_STRUCTURE_TO_MESH`, `GRADIENT_SPREAD`, `GRADIENT_MAX_BLEND`,
+`_gradVertexPos`) 이름 충돌 없음을 grep으로 확인(과거 `worldToScreenPx` 중복 사고 교훈 반영).
+Dura/Falx/Tentorium/Ventricles의 vertex 수(52000/1113/1521/14737)를 미리 확인해서 exp() 컷오프로
+성능 여유 확보.
+
+검증 못한 것(사용자 브라우저 확인 필요): 실제로 종양 주변에 그라디언트가 눈에 보이는지, 색/투명도
+느낌이 기대한 것과 맞는지, 여러 종양이 겹칠 때 자연스러운지, Dura처럼 vertex가 많은 막에서 드래그 중
+버벅임이 없는지(있으면 sigma/opacity 값이나 recompute 빈도를 조정 가능).
+
+## 완료된 작업 (2026-07-06 두번째 - 그라디언트 초기 검은색 버그 수정 + 세기 조정 + 전체 영문화 + 툴팁 위치 수정)
+사용자가 그라디언트 기능을 켜본 뒤 "① 처음 열면 Brain/Dura가 새까맣게 보인다(Add Tumor 하면 고쳐짐),
+② 그라디언트가 너무 은은하다, ③ 왼쪽 패널 한글을 전부 영어로, ④ 특정 (i) 툴팁이 메인 화면에 잘려
+보인다"고 피드백함.
+
+**① 검은색 버그의 진짜 원인(중요, 다음에도 참고)**: 단순히 "종양이 없을 때 색 attribute가 없어서"가
+아니었음 — 실제 원인은 `loadLocal();` 호출이 mesh 빌드하는 `try{}` 블록 안(스크립트 초반부)에 있는데,
+`let tumors = [];`는 그보다 한참 뒤(스크립트 후반부, "Tumor management" 섹션)에 선언되어 있었음. 이
+IIFE 전체가 위에서 아래로 한 번에 실행되는 구조라서, `loadLocal()`이 호출되는 시점엔 아직 `tumors`가
+temporal dead zone 상태 — 저장된 종양이 있으면 `addTumor()`가 `tumors.push()`에서 무조건
+ReferenceError를 던졌고, `loadLocal()` 자신의 try/catch가 이걸 조용히 삼켜서 지금까지 "저장된 종양
+복원" 기능 자체가 브라우저에서 한 번도 성공한 적이 없었을 가능성이 높음(이전 세션들은 Node로
+`flashSaveStatus`의 좁은 TDZ 우려만 확인했지, `loadLocal→addTumor→tumors` 체인 전체를 실제 브라우저로
+검증한 적은 없었음 — 이번에 `updateAttachmentGradients()`를 그 try 블록 안에 추가하면서 매번(종양
+유무 상관없이) 100% 재현되어 발견함). **수정**: `loadLocal();`과 `updateAttachmentGradients();` 호출을
+try 블록에서 완전히 빼서, 스크립트 맨 끝(`animate()` 호출 직전, 모든 변수/함수 선언이 끝난 뒤)으로
+옮김. 이제 종양 없이 첫 로드해도 정상 회색으로 보이고, 저장된 종양이 있었다면 이번엔 실제로 복원될
+것으로 예상함(사용자 확인 필요 — 예전에 저장해둔 종양이 있다면 이번에 처음으로 실제로 뜰 수도 있음).
+
+**②** `GRADIENT_MAX_BLEND` 0.55 → 0.95로 올림(사용자가 처음엔 0.85 요청했다가 반영이 안 보이자
+0.95로 재요청 — 실은 ①의 TDZ 버그 때문에 0.85 자체가 전혀 적용된 적이 없었던 것, 이번 수정으로 0.95가
+정상적으로 적용될 것).
+
+**③ 왼쪽 패널 전체 영문화**: `<html lang="ko">`→`lang="en"` 포함, 정적 HTML(라벨/버튼/드롭다운/hint
+텍스트/title 속성)과 JS에서 동적으로 뜨는 alert/confirm/flashSaveStatus/flashHintBar/올가미 버튼
+텍스트까지 전부(약 40곳) 영어로 교체. grep으로 한글(가-힣) 전수 검색해서 하나도 안 남을 때까지 확인함.
+
+**④ 툴팁이 3D 화면에 잘려 보이던 문제**: `.hintBox`가 `position:absolute`로 `.hintWrap` 기준
+`left:0`에 붙어 있었는데, 사이드바(`#sidebar`)가 `overflow-y:auto`라 (스펙상 overflow-x도 auto로 강제됨)
+아이콘 위치에 따라 오른쪽으로 넘치는 만큼 잘렸음(3D 캔버스가 덮어서 잘린 것처럼 보였던 것). CSS만으로는
+아이콘 위치별로 다르게 대응할 수 없어서, `.hintBox`를 `position:fixed`로 바꾸고 JS로 `mouseenter` 시
+아이콘의 실제 화면 좌표(`getBoundingClientRect`)를 구해서 뷰포트 안에 들어오도록 clamp해서
+top/left를 계산해 넣는 방식으로 바꿈(script 최상단에 `.hintTrigger` 전체에 이벤트 리스너 등록).
+CSS의 `.hintWrap:hover .hintBox{display:block}` 규칙은 제거하고 JS의 mouseenter/leave로 대체함.
+6곳의 기존 hintBox 마크업(내용)은 그대로 두고 표시 방식만 바꿔서 리스크를 줄임.
+
+검증한 것: JS 문법(`new Function()` 파싱) 통과, 주요 DOM id(`editHint`, `addModeHint`, `saveStatus`,
+`undoEditBtn`, `lassoModeBtn`, `hintTrigger`/`hintBox`/`hintWrap` 등) grep으로 개수 확인, 한글 잔존
+여부 grep 전수 확인(코드 주석 1곳도 마저 영문화함).
+검증 못한 것(사용자 브라우저 확인 필요): 새로고침 시 Dura가 정상 회색으로 뜨는지, 그라디언트가 0.95로
+확실히 진하게 보이는지, 모든 (i) 툴팁이 화면 안에서 안 잘리고 잘 뜨는지, 예전에 저장해뒀던 종양이
+있다면 이번엔 정말 복원되는지(위 ① 참고 — 사용자 입장에서는 "전에 없던 종양이 갑자기 나타남"처럼
+보일 수 있음, 당황하지 않도록 미리 안내 필요).
+
+## 완료된 작업 (2026-07-06 세번째 - 사이드바 라벨 추가 축약 + 3열 그리드 + Dura-Skull 빈틈 메우기)
+
+**라벨/레이아웃**: "Per-Axis Scale (shape sculpting -- tumor-local X/Y/Z)" → "Size (Scale)",
+"Direct Mesh Edit (Remove Problem Areas)" → "Edit Mesh", "View Cross-Section (ventricle · skull
+base · clip plane)" → "CROSS SECTION", "Show/Hide Structures" → "Show/Hide"(참조하는 hint 문구 2곳도
+같이 맞춤). Show/Hide 섹션 체크박스만 `.grid2`(2열) → 새로 만든 `.grid3`(3열)로 변경, 다른 2열 그리드
+(Update/Delete 버튼, JSON/CSV 내보내기)는 그대로 둠.
+
+**Dura-Skull 빈틈(사용자가 스크린샷 2장으로 제보: cerebellum/후두부 쪽에 Dura와 Skull 사이 검은
+빈 공간)**: 브라우저에서 직접 볼 수 없어서 Python(numpy/scipy)으로 `OBJTXT_DURA`/`OBJTXT_SKULLBASE`
+vertex를 직접 분석·수정함.
+
+1. Dura(52,001 vertex)의 각 vertex에서 Skull(7,679 vertex) 최근접 vertex까지 거리를 KDTree로 계산.
+   전체 중앙값은 ~5mm(뇌-두개골 사이 정상적인 CSF 공간으로 추정, 문제 아님)인데, cerebellum/후두와
+   맞닿는 부위(Y<-5 & Z<-30 근방)에서 거리 10mm 이상인 vertex가 몰려있음을 확인(스크린샷의 검은
+   빈틈과 일치) — 최대 약 25mm까지 벌어짐.
+2. Dura의 face 데이터로 vertex별 바깥쪽 법선을 계산(three.js computeVertexNormals와 같은 방식,
+   area-weighted). 이 파일의 Dura는 원래 winding이 안쪽을 향해 계산되길래(top-of-head/rightmost
+   vertex로 검증) 부호를 뒤집어서 씀.
+3. Y/Z 기준 smoothstep으로 "cerebellum/후두 부위"에만 가중치(0~1)를 부여해서 그 영역에서만, 그리고
+   경계에서 부드럽게 사라지도록 함(각짐/이음새 방지). 가중치>0인 vertex를 목표 간격 1.5mm까지
+   바깥쪽 법선 방향으로 밀어냄 — 최근접 거리 계산 결과를 그때그때 다시 재서 5회 반복 적용(한 번에
+   다 밀면 방향이 100% 정확하지 않아 부족하거나 넘칠 수 있어서, 매번 다시 재고 조금씩 미는 방식).
+   반복을 너무 많이 하면(6회 이상) 일부 vertex가 Skull의 움푹 파인/잘린 부분(이전 세션에서 C1/C2
+   정렬하며 잘라낸 y<-95 부분 등) 근처에서 최근접점이 계속 더 먼 곳으로 튀면서 발산하는 현상을
+   발견해서, 한 번에 최대 4mm까지만 밀리게 상한을 걸고 5회에서 멈춤(그 이상은 득보다 실이 큼).
+4. 결과: 영향받은 14,087개 vertex의 중앙값 간격이 7.08mm → 2.70mm로, 10mm 넘게 벌어진 비율이
+   68.9% → 19.0%로 줄어듦. 완벽하게 0으로 만들지는 못했음(각 vertex의 실제 표면 법선이 "최근접
+   Skull 지점 방향"과 정확히 일치하지 않는 근사법의 한계 — 정확히 하려면 vertex마다 Skull face에
+   대해 진짜 ray-triangle intersection을 해야 하는데, 이번엔 시간상 근접-vertex 거리 근사로 진행함).
+   face 면적이 0/음수가 되는 degenerate 삼각형은 없음, NaN 없음 확인.
+5. `meningioma_3d_tumor_mapper_pre_voxel.html`의 `OBJTXT_DURA` 텍스트를 새 좌표로 교체(face 인덱스는
+   그대로, vertex 좌표만 갱신). Falx/Tentorium은 이번에 손대지 않음(사용자가 Dura만 언급함).
+
+검증한 것: JS 문법(`new Function()`), Dura vertex/face 개수 그대로(52001/104000), NaN/degenerate
+face 없음, Python으로 재계산한 최근접 거리 통계로 개선 확인.
+검증 못한 것(사용자 브라우저 확인 필요): 실제 화면에서 검은 빈틈이 충분히 메워져 보이는지, 아직
+남은 19%(주로 접근이 애매한 구석 부위로 추정)가 눈에 띄게 거슬리는지, Dura가 이번 변경으로 다른
+데서 부자연스럽게 울퉁불퉁해지지 않았는지. 스크린샷 주시면 남은 부분 추가로 좁힐 수 있음.
+
+## 버그 수정 (2026-07-06 - Dura 확장 결과가 "뾰족뾰족 solute/징그럽게" 나온 문제)
+바로 위 항목(Dura-Skull 빈틈 메우기)을 사용자가 실제로 열어보니 cerebellum 부위가 산호/가시처럼
+뾰족뾰족 솟아나는 흉한 모양이 됐다고 스크린샷과 함께 피드백함("sprouting하는 느낌", "징그럽다").
+
+**원인**: 각 vertex를 "그 vertex의 최근접 Skull vertex까지 거리"만큼 밀었는데, 이 최근접-이웃 거리
+자체가 (a) Skull 표면이 실제로 약간 울퉁불퉁하고 (b) Dura가 뇌 표면의 잔주름(gyral fold)을 그대로
+반영한 지오메트리라서, 이웃한 Dura vertex끼리도 값이 들쭉날쭉했음. 거기다 이 값을 5번 반복
+재계산(매번 다시 최근접점을 찾아서 밈)해서 조금씩 어긋난 방향/크기가 반복마다 증폭되어 뾰족한
+가시 형태로 자라난 것 — 마치 세포자동자(cellular automaton)가 발산하듯 함. Laplacian smoothing으로
+이 거리 값 자체를 매끄럽게 만들어봐도(최대 1200회 반복까지 시도) 표준편차가 크게 안 줄어서, "노이즈"가
+아니라 Skull 표면 자체의 실제 굴곡이 원인임을 확인함. 또 "중심점에서 뻗는 방향 기준으로 반지름만
+늘리기"(radial inflation) 방식도 시도했으나, 각도 기준 최근접 탐색이 가끔 완전히 엉뚱한(먼) Skull
+부위와 매칭되면서 한 vertex가 113mm까지 튀는 더 심한 문제가 생겨서 폐기함.
+
+**수정**: 원래(vertex 자체 법선 방향) 접근으로 되돌리되,
+1. 반복 재계산(iterative)을 없애고 **한 번만** 미는 방식으로 바꿈(반복에 의한 증폭 원천 차단).
+2. 미는 양(scalar) 자체를 mesh 연결성 기반 Laplacian smoothing으로 120회 매끄럽게 처리.
+3. 미는 방향(법선)도 30회 smoothing해서 뇌 주름을 그대로 따라가지 않고 완만하게 변하도록 함.
+4. 부위 가중치(weight)도 20회 smoothing.
+5. 한 vertex당 최대 이동거리를 20mm → **6mm로 대폭 보수적으로 낮춤**(완벽히 다 메우기보다 "안
+   흉하게" 우선).
+검증: 인접 edge 길이가 원래 대비 얼마나 늘어났는지(edge length ratio)를 계산해서 "뾰족함" 정도를
+수치로 확인 — 영향받은 edge 기준 중앙값 1.05배, 95%가 1.37배 이내, 최댓값 3.18배(전과 비교할 수치는
+없지만 이전 결과가 육안으로 산호 모양이었던 것과 달리 이번엔 완만한 변화). 결과적으로 간격 중앙값은
+7.08mm → 4.34mm로 줄어듦(전처럼 1.5mm까지 완전히 못 좁혔지만, 안전 마진을 우선한 트레이드오프).
+face 면적 degenerate/NaN 없음, bbox 정상 확인.
+
+검증 못한 것(중요, 사용자 확인 필수): 이번에도 실제 화면은 못 봤음 — 수치상 훨씬 완만해야 하지만
+직접 봐야 확실함. 스크린샷으로 다시 확인 부탁드리고, 그래도 이상하면 즉시 알려주면 이번엔 원본으로
+되돌리는 것부터 다시 시작할 것(같은 실수 반복 안 하려면 반복 재계산 방식은 다시 안 쓸 것).
+
 ## 남은 미해결 이슈
 - Foramen magnum/C1 부근에서 두개골이 복측(ventral) dura를 뚫고 나오는 문제 (자동 수정 시도가
   심하게 왜곡돼서 되돌려 놓은 상태, 정확한 위치 스크린샷 필요) — 위 Spine/Skull 정렬 문제와 같은
